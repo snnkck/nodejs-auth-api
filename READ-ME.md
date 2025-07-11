@@ -9,11 +9,11 @@ Projede yapılabilir aksiyonlar;
 Mevcut auth sisteminizi daha gelişmiş hale getirmek için şu özellikler eklenebilir:
 1. Gelişmiş Güvenlik Özellikleri
 
-Two-Factor Authentication (2FA): TOTP, SMS veya email tabanlı
-Device Management: Güvenilir cihazları kaydetme
-IP Whitelist/Blacklist: Şüpheli IP'leri engelleme
-Session Management: Aktif oturumları yönetme
-CAPTCHA Integration: Bot saldırılarını önleme
+-Two-Factor Authentication (2FA): TOTP, SMS veya email tabanlı
+-Device Management: Güvenilir cihazları kaydetme
+-IP Whitelist/Blacklist: Şüpheli IP'leri engelleme
+-Session Management: Aktif oturumları yönetme
+-CAPTCHA Integration: Bot saldırılarını önleme
 
 2. Kullanıcı Deneyimi İyileştirmeleri
 
