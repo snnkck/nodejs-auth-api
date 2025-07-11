@@ -22,6 +22,8 @@ model User {
   emailVerified Boolean @default(false)
   emailVerificationToken String?
   emailVerificationTokenExpiry DateTime?
+  googleId  String? @unique
+  avatar    String?
   resetToken String?
   resetTokenExpry DateTime?
   refreshToken String?

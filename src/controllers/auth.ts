@@ -14,6 +14,14 @@ import {
 } from "../utils/errors";
 import AppResponse from "../utils/response";
 import { asyncHandler } from "../utils/async-handler";
+import { OAuth2Client } from 'google-auth-library';
+
+// Google OAuth client
+const googleClient = new OAuth2Client(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  `${process.env.BACKEND_URL}/api/auth/google/callback`
+);
 
 // Token oluşturma yardımcı fonksiyonu
 const generateTokens = (userId: number) => {
@@ -31,6 +39,326 @@ const generateTokens = (userId: number) => {
 
   return { accessToken, refreshToken };
 };
+
+// Google OAuth URL oluşturma
+export const getGoogleAuthUrl = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const state = crypto.randomBytes(16).toString('hex');
+
+  console.log('OAuth2Client redirect URI:', `${process.env.BACKEND_URL}/api/auth/google/callback`);
+
+  const authUrl = googleClient.generateAuthUrl({
+    access_type: 'offline',
+    scope: ['profile', 'email'],
+    state: state,
+    prompt: 'select_account'
+  });
+
+  new AppResponse(
+    { authUrl, state },
+    "Google OAuth URL oluşturuldu"
+  ).success(res);
+});
+
+// Google OAuth callback
+export const googleAuthCallback = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const { code, state } = req.body;
+
+  if (!code) {
+    throw new ValidationError("Authorization code gereklidir");
+  }
+
+  try {
+    // Token al
+    const { tokens } = await googleClient.getToken(code);
+    googleClient.setCredentials(tokens);
+
+    // Kullanıcı bilgilerini al
+    const ticket = await googleClient.verifyIdToken({
+      idToken: tokens.id_token!,
+      audience: process.env.GOOGLE_CLIENT_ID
+    });
+
+    const payload = ticket.getPayload();
+    
+    if (!payload) {
+      throw new AuthenticationError("Google token doğrulanamadı");
+    }
+
+    const { email, name, picture, sub: googleId } = payload;
+
+    if (!email) {
+      throw new ValidationError("Google hesabından email alınamadı");
+    }
+
+    // Kullanıcı var mı kontrol et
+    let user = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { email: email },
+          { googleId: googleId }
+        ]
+      }
+    });
+
+    if (user) {
+      // Kullanıcı var, Google ID'yi güncelle (yoksa)
+      if (!user.googleId) {
+        user = await prisma.user.update({
+          where: { id: user.id },
+          data: {
+            googleId: googleId,
+            avatar: picture || user.avatar,
+            emailVerified: true // Google ile giriş yapanlar otomatik doğrulanır
+          }
+        });
+      }
+    } else {
+      // Yeni kullanıcı oluştur
+      user = await prisma.user.create({
+        data: {
+          name: name || 'Google User',
+          email: email,
+          googleId: googleId,
+          avatar: picture,
+          emailVerified: true,
+          password: hashSync(crypto.randomBytes(32).toString('hex'), 10) // Rastgele şifre
+        }
+      });
+    }
+
+    // JWT tokenları oluştur
+    const { accessToken, refreshToken } = generateTokens(user.id);
+
+    // Refresh token'ı veritabanında sakla
+    const refreshTokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 gün
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        refreshToken,
+        refreshTokenExpiry
+      }
+    });
+
+    const { password: _, ...userWithoutPassword } = user;
+    
+    new AppResponse(
+      { 
+        user: userWithoutPassword, 
+        accessToken,
+        refreshToken 
+      },
+      "Google ile giriş başarılı!"
+    ).success(res);
+
+  } catch (error) {
+    console.error('Google OAuth Error:', error);
+    if (error instanceof APIError) {
+      throw error;
+    }
+    throw new DatabaseError("Google ile giriş yapılırken bir hata oluştu");
+  }
+});
+
+export const googleAuthCallbackGET = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const { code, state } = req.query;
+
+  if (!code) {
+    throw new ValidationError("Authorization code gereklidir");
+  }
+
+  try {
+    const { tokens } = await googleClient.getToken(code as string);
+    googleClient.setCredentials(tokens);
+
+    const ticket = await googleClient.verifyIdToken({
+      idToken: tokens.id_token!,
+      audience: process.env.GOOGLE_CLIENT_ID
+    });
+
+    const payload = ticket.getPayload();
+
+    if (!payload) throw new AuthenticationError("Google token doğrulanamadı");
+
+    const { email, name, picture, sub: googleId } = payload;
+
+    if (!email) {
+      throw new ValidationError("Google hesabından email alınamadı");
+    }
+
+    let user = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { email: email },
+          { googleId: googleId }
+        ]
+      }
+    });
+
+    if (user) {
+      if (!user.googleId) {
+        user = await prisma.user.update({
+          where: { id: user.id },
+          data: {
+            googleId: googleId,
+            avatar: picture || user.avatar,
+            emailVerified: true
+          }
+        });
+      }
+    } else {
+      user = await prisma.user.create({
+        data: {
+          name: name || 'Google User',
+          email: email,
+          googleId: googleId,
+          avatar: picture,
+          emailVerified: true,
+          password: hashSync(crypto.randomBytes(32).toString('hex'), 10)
+        }
+      });
+    }
+
+    const { accessToken, refreshToken } = generateTokens(user.id);
+    const refreshTokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        refreshToken,
+        refreshTokenExpiry
+      }
+    });
+
+    // frontend'e token ile redirect et
+    res.status(200).json({
+      accessToken: accessToken,
+      refreshToken: refreshToken
+    });
+
+  } catch (error) {
+    console.error("Google Callback GET error:", error);
+    if (error instanceof APIError) {
+      throw error;
+    }
+    throw new DatabaseError("Google ile giriş yapılırken bir hata oluştu");
+  }
+});
+
+
+// Google hesabı bağlama (mevcut kullanıcı için)
+export const linkGoogleAccount = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const { code } = req.body;
+  const userId = req.user?.id;
+
+  if (!userId) {
+    throw new AuthenticationError("Kullanıcı kimlik doğrulaması gerekli");
+  }
+
+  if (!code) {
+    throw new ValidationError("Authorization code gereklidir");
+  }
+
+  try {
+    // Token al
+    const { tokens } = await googleClient.getToken(code);
+    googleClient.setCredentials(tokens);
+
+    // Kullanıcı bilgilerini al
+    const ticket = await googleClient.verifyIdToken({
+      idToken: tokens.id_token!,
+      audience: process.env.GOOGLE_CLIENT_ID
+    });
+
+    const payload = ticket.getPayload();
+    
+    if (!payload) {
+      throw new AuthenticationError("Google token doğrulanamadı");
+    }
+
+    const { email, sub: googleId } = payload;
+
+    // Bu Google hesabı başka bir kullanıcıda kayıtlı mı?
+    const existingUser = await prisma.user.findFirst({
+      where: {
+        googleId: googleId,
+        id: { not: userId }
+      }
+    });
+
+    if (existingUser) {
+      throw new DuplicateEntryError("Bu Google hesabı başka bir kullanıcıya bağlı");
+    }
+
+    // Mevcut kullanıcıya Google hesabını bağla
+    const updatedUser = await prisma.user.update({
+      where: { id: userId },
+      data: {
+        googleId: googleId,
+        avatar: payload.picture || undefined
+      }
+    });
+
+    const { password: _, ...userWithoutPassword } = updatedUser;
+    
+    new AppResponse(
+      userWithoutPassword,
+      "Google hesabı başarıyla bağlandı!"
+    ).success(res);
+
+  } catch (error) {
+    console.error('Google Link Error:', error);
+    if (error instanceof APIError) {
+      throw error;
+    }
+    throw new DatabaseError("Google hesabı bağlanırken bir hata oluştu");
+  }
+});
+
+// Google hesabı bağlantısını kaldırma
+export const unlinkGoogleAccount = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const userId = req.user?.id;
+
+  if (!userId) {
+    throw new AuthenticationError("Kullanıcı kimlik doğrulaması gerekli");
+  }
+
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: userId }
+    });
+
+    if (!user) {
+      throw new AuthenticationError("Kullanıcı bulunamadı");
+    }
+
+    // Şifre yoksa Google hesabını kaldırmaya izin verme
+    if (!user.password && user.googleId) {
+      throw new ValidationError("Google hesabını kaldırmadan önce bir şifre belirleyin");
+    }
+
+    // Google bağlantısını kaldır
+    const updatedUser = await prisma.user.update({
+      where: { id: userId },
+      data: {
+        googleId: null
+      }
+    });
+
+    const { password: _, ...userWithoutPassword } = updatedUser;
+    
+    new AppResponse(
+      userWithoutPassword,
+      "Google hesabı bağlantısı kaldırıldı!"
+    ).success(res);
+
+  } catch (error) {
+    if (error instanceof APIError) {
+      throw error;
+    }
+    throw new DatabaseError("Google hesabı bağlantısı kaldırılırken bir hata oluştu");
+  }
+});
 
 export const signup = asyncHandler(async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   const { name, email, password } = req.body;

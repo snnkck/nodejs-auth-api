@@ -90,3 +90,26 @@ Load Balancing: Yük dengeleme
 
 - Giriş yapan kullanıcılar bu endpointe erişebilir.
 
+## Google ile kayıt/giriş
+
+- http://localhost:5000/api/auth/google/ endpointine gidilir.
+
+- dönen response şu şekildedir.
+
+ {
+    "success": true,
+    "data": {
+        "authUrl": "https://accounts.google.com/.....",
+        "state": "cac7c5f5013a3afe7a4asdasdwdw"
+    },
+    "message": "Google OAuth URL oluşturuldu",
+    "timestamp": "2025-07-11T20:06:50.651Z"
+}
+
+- autUrl valuedeki linki tarayıcıda aç google hesabını gir
+
+- geriye response olarak accessToken ve refreshToken dönecektir.
+
+Not: Test amaçlı google/callback endpointine get route eklenmiştir.
+Normal olarak post route kullanılacaktır.
+
