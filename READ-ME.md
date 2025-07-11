@@ -90,13 +90,3 @@ Load Balancing: Yük dengeleme
 
 - Giriş yapan kullanıcılar bu endpointe erişebilir.
 
-
-
-
-
-### YAPILACAKLAR
-
-- kayıt doğrulama(kayıt olunca maile link gelecek ve o linke tıklayınca kayıt onaylacak.)
-- auth için google ile giriş
-- iki adımla doğrulama girişi
-- güvenlik önlemleri

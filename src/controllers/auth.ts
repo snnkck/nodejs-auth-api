@@ -15,6 +15,23 @@ import {
 import AppResponse from "../utils/response";
 import { asyncHandler } from "../utils/async-handler";
 
+// Token oluşturma yardımcı fonksiyonu
+const generateTokens = (userId: number) => {
+  const accessToken = jwt.sign(
+    { userId, type: 'access' },
+    process.env.JWT_SECRET!,
+    { expiresIn: '15m' }
+  );
+
+  const refreshToken = jwt.sign(
+    { userId, type: 'refresh' },
+    process.env.JWT_REFRESH_SECRET!,
+    { expiresIn: '7d' }
+  );
+
+  return { accessToken, refreshToken };
+};
+
 export const signup = asyncHandler(async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   const { name, email, password } = req.body;
   
@@ -102,13 +119,11 @@ export const signup = asyncHandler(async (req: Request, res: Response, next: Nex
 export const signin = asyncHandler(async (req: Request, res: Response): Promise<void> => {
   const { email, password } = req.body;
   
-  // Validasyon
   if (!email || !password) {
     throw new ValidationError("Email ve şifre gereklidir");
   }
 
   try {
-    // Kullanıcıyı bul
     const user = await prisma.user.findUnique({
       where: { email }
     });
@@ -117,28 +132,43 @@ export const signin = asyncHandler(async (req: Request, res: Response): Promise<
       throw new AuthenticationError("Geçersiz email veya şifre!");
     }
 
-    // Şifreyi kontrol et!
     if (!compareSync(password, user.password)) {
       throw new AuthenticationError("Geçersiz email veya şifre!");
     }
 
-    // E-postanın doğrulanıp doğrulanmadığını kontrol et
     if (!user.emailVerified) {
       throw new AuthenticationError("Lütfen önce email adresinizi doğrulayın!");
     }
 
-    // Token oluştur
-    const token = jwt.sign(
-      { userId: user.id },
-      process.env.JWT_SECRET!,
-      { expiresIn: '24h' }
-    );
+    console.log(user.id,"user.id::::::",typeof(user.id));
+    
 
-    // Hassas bilgileri kaldır
+    // Access ve Refresh token oluştur
+    const { accessToken, refreshToken } = generateTokens(user.id);
+
+    console.log("accessToken::",accessToken);
+    console.log("refreshToken:::", refreshToken);
+    
+    
+    // Refresh token'ı veritabanında sakla
+    const refreshTokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 gün
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        refreshToken,
+        refreshTokenExpiry
+      }
+    });
+
     const { password: _, ...userWithoutPassword } = user;
     
     new AppResponse(
-      { user: userWithoutPassword, token },
+      { 
+        user: userWithoutPassword, 
+        accessToken,
+        refreshToken 
+      },
       "Giriş başarılı!"
     ).success(res);
 
@@ -147,6 +177,125 @@ export const signin = asyncHandler(async (req: Request, res: Response): Promise<
       throw error;
     }
     throw new DatabaseError("Giriş yapılırken bir hata oluştu");
+  }
+});
+
+// Yeni token alma endpoint'i
+export const refreshToken = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const { refreshToken } = req.body;
+
+  if (!refreshToken) {
+    throw new ValidationError("Refresh token gereklidir");
+  }
+
+  try {
+    // Refresh token'ı doğrula
+    const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET!) as any;
+    
+    if (decoded.type !== 'refresh') {
+      throw new InvalidTokenError("Geçersiz token tipi");
+    }
+
+    // Veritabanından kullanıcı ve token kontrol et
+    const user = await prisma.user.findFirst({
+      where: {
+        id: decoded.userId,
+        refreshToken: refreshToken,
+        refreshTokenExpiry: {
+          gt: new Date()
+        }
+      }
+    });
+
+    if (!user) {
+      throw new InvalidTokenError("Geçersiz veya süresi dolmuş refresh token");
+    }
+
+    // Yeni tokenlar oluştur
+    const { accessToken, refreshToken: newRefreshToken } = generateTokens(user.id);
+
+    // Yeni refresh token'ı veritabanında güncelle
+    const newRefreshTokenExpiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        refreshToken: newRefreshToken,
+        refreshTokenExpiry: newRefreshTokenExpiry
+      }
+    });
+
+    new AppResponse(
+      { 
+        accessToken,
+        refreshToken: newRefreshToken
+      },
+      "Token yenilendi"
+    ).success(res);
+
+  } catch (error) {
+    if (error instanceof jwt.JsonWebTokenError) {
+      throw new InvalidTokenError("Geçersiz refresh token");
+    }
+    if (error instanceof APIError) {
+      throw error;
+    }
+    throw new DatabaseError("Token yenileme sırasında bir hata oluştu");
+  }
+});
+
+// Logout fonksiyonu
+export const logout = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const { refreshToken } = req.body;
+
+  if (!refreshToken) {
+    throw new ValidationError("Refresh token gereklidir");
+  }
+
+  try {
+    // Refresh token'ı veritabanından sil
+    await prisma.user.updateMany({
+      where: { refreshToken },
+      data: {
+        refreshToken: null,
+        refreshTokenExpiry: null
+      }
+    });
+
+    new AppResponse(null, "Çıkış yapıldı").success(res);
+
+  } catch (error) {
+    if (error instanceof APIError) {
+      throw error;
+    }
+    throw new DatabaseError("Çıkış yapılırken bir hata oluştu");
+  }
+});
+
+// Tüm oturumları sonlandırma
+export const logoutAllDevices = asyncHandler(async (req: Request, res: Response): Promise<void> => {
+  const userId = req.user?.id;
+
+  if (!userId) {
+    throw new AuthenticationError("Kullanıcı kimlik doğrulaması gerekli");
+  }
+
+  try {
+    await prisma.user.update({
+      where: { id: userId },
+      data: {
+        refreshToken: null,
+        refreshTokenExpiry: null
+      }
+    });
+
+    new AppResponse(null, "Tüm cihazlardan çıkış yapıldı").success(res);
+
+  } catch (error) {
+    if (error instanceof APIError) {
+      throw error;
+    }
+    throw new DatabaseError("Çıkış yapılırken bir hata oluştu");
   }
 });
 
